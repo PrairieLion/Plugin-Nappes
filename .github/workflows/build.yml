@@ -1,1 +1,57 @@
+name: Build Reverie
 
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS
+            os: macos-latest
+            archs: "arm64;x86_64"
+          - name: Windows
+            os: windows-latest
+            archs: ""
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        shell: bash
+        run: |
+          if [ "${{ matrix.name }}" = "macOS" ]; then
+            cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="${{ matrix.archs }}"
+          else
+            cmake -B build -DCMAKE_BUILD_TYPE=Release
+          fi
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Package (macOS)
+        if: matrix.name == 'macOS'
+        run: |
+          mkdir -p dist
+          codesign --force --deep --sign - build/Reverie_artefacts/Release/VST3/Reverie.vst3
+          codesign --force --deep --sign - build/Reverie_artefacts/Release/AU/Reverie.component
+          ditto -c -k --keepParent build/Reverie_artefacts/Release/VST3/Reverie.vst3 dist/Reverie-VST3-macOS.zip
+          ditto -c -k --keepParent build/Reverie_artefacts/Release/AU/Reverie.component dist/Reverie-AU-macOS.zip
+
+      - name: Package (Windows)
+        if: matrix.name == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Compress-Archive -Path build/Reverie_artefacts/Release/VST3/Reverie.vst3 -DestinationPath dist/Reverie-VST3-Windows.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Reverie-${{ matrix.name }}
+          path: dist/*.zip
