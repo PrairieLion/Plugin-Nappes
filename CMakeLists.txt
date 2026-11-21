@@ -19,6 +19,9 @@ else()
     FetchContent_MakeAvailable(JUCE)
 endif()
 
+# (REVERIE_CI est une option factice utilisée par le workflow GitHub)
+set(REVERIE_CI_UNUSED "${REVERIE_CI}")
+
 # Copie automatique du plugin dans le dossier système (sauf sur un serveur d'intégration continue)
 if(DEFINED ENV{CI})
     set(REVERIE_COPY FALSE)

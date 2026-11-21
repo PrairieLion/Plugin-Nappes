@@ -6,6 +6,8 @@
 #include <array>
 #include <cmath>
 #include <algorithm>
+#include <memory>
+#include <cstdint>
 
 namespace rv
 {
@@ -476,6 +478,541 @@ public:
 private:
     float sr = 44100.0f, thr = -18.0f, ratio = 3.0f, aA = 0.99f, aR = 0.999f, makeup = 0.0f, grDb = 0.0f, knee = 8.0f;
     Smoother mixSm;
+};
+
+
+// ---------------------------------------------------------------------------
+//  Utilitaires : tableau brut (sans avertissements de signe) et FFT radix-2
+// ---------------------------------------------------------------------------
+struct FArr
+{
+    std::unique_ptr<float[]> p;
+    int n = 0;
+    void alloc (int size, float v = 0.0f) { n = size; p.reset (new float[(size_t) size]); std::fill (p.get(), p.get() + size, v); }
+    inline float& operator[] (int i)       { return p.get()[i]; }
+    inline float  operator[] (int i) const { return p.get()[i]; }
+    float* data() { return p.get(); }
+};
+
+class FFT
+{
+public:
+    void prepare (int size)
+    {
+        n = size;
+        twr.alloc (n / 2);  twi.alloc (n / 2);  rev.assign ((size_t) n, 0);
+        int bits = 0;  while ((1 << bits) < n) ++bits;
+        for (int k = 0; k < n / 2; ++k)
+        {
+            twr[k] =  std::cos (2.0f * PI * (float) k / (float) n);
+            twi[k] = -std::sin (2.0f * PI * (float) k / (float) n);
+        }
+        for (int i = 0; i < n; ++i)
+        {
+            int r = 0;
+            for (int b = 0; b < bits; ++b) if (i & (1 << b)) r |= 1 << (bits - 1 - b);
+            rev[(size_t) i] = r;
+        }
+    }
+    // Transformée directe ou inverse (non normalisée)
+    void run (float* re, float* im, bool inverse) const
+    {
+        for (int i = 0; i < n; ++i)
+        {
+            const int j = rev[(size_t) i];
+            if (i < j) { std::swap (re[i], re[j]); std::swap (im[i], im[j]); }
+        }
+        for (int len = 2; len <= n; len <<= 1)
+        {
+            const int half = len >> 1, step = n / len;
+            for (int i = 0; i < n; i += len)
+                for (int j = 0; j < half; ++j)
+                {
+                    const float wr = twr[j * step];
+                    const float wi = inverse ? -twi[j * step] : twi[j * step];
+                    const int a = i + j, b = a + half;
+                    const float tr = re[b] * wr - im[b] * wi;
+                    const float ti = re[b] * wi + im[b] * wr;
+                    re[b] = re[a] - tr;  im[b] = im[a] - ti;
+                    re[a] += tr;         im[a] += ti;
+                }
+        }
+    }
+private:
+    int n = 0;
+    FArr twr, twi;
+    std::vector<int> rev;
+};
+
+// ---------------------------------------------------------------------------
+//  Filtres biquad (formules RBJ) : passe-haut/bas, cloche, plateaux
+// ---------------------------------------------------------------------------
+struct BiquadCoeffs
+{
+    float b0 = 1.0f, b1 = 0.0f, b2 = 0.0f, a1 = 0.0f, a2 = 0.0f;
+
+    static BiquadCoeffs make (float b0, float b1, float b2, float a0, float a1, float a2)
+    {
+        BiquadCoeffs c;
+        c.b0 = b0 / a0;  c.b1 = b1 / a0;  c.b2 = b2 / a0;  c.a1 = a1 / a0;  c.a2 = a2 / a0;
+        return c;
+    }
+    static float clampF (float f, float fs) { return std::min (std::max (f, 10.0f), 0.47f * fs); }
+
+    static BiquadCoeffs lowpass (float fs, float f, float q = 0.7071f)
+    {
+        const float w = 2.0f * PI * clampF (f, fs) / fs, c = std::cos (w), al = std::sin (w) / (2.0f * q);
+        return make ((1 - c) * 0.5f, 1 - c, (1 - c) * 0.5f, 1 + al, -2 * c, 1 - al);
+    }
+    static BiquadCoeffs highpass (float fs, float f, float q = 0.7071f)
+    {
+        const float w = 2.0f * PI * clampF (f, fs) / fs, c = std::cos (w), al = std::sin (w) / (2.0f * q);
+        return make ((1 + c) * 0.5f, -(1 + c), (1 + c) * 0.5f, 1 + al, -2 * c, 1 - al);
+    }
+    static BiquadCoeffs peak (float fs, float f, float gainDb, float q)
+    {
+        const float A = std::pow (10.0f, gainDb / 40.0f);
+        const float w = 2.0f * PI * clampF (f, fs) / fs, c = std::cos (w), al = std::sin (w) / (2.0f * std::max (0.1f, q));
+        return make (1 + al * A, -2 * c, 1 - al * A, 1 + al / A, -2 * c, 1 - al / A);
+    }
+    static BiquadCoeffs lowShelf (float fs, float f, float gainDb)
+    {
+        const float A = std::pow (10.0f, gainDb / 40.0f);
+        const float w = 2.0f * PI * clampF (f, fs) / fs, c = std::cos (w), s = std::sin (w);
+        const float t = 2.0f * std::sqrt (A) * (s * 0.70710678f);
+        return make (A * ((A + 1) - (A - 1) * c + t), 2 * A * ((A - 1) - (A + 1) * c), A * ((A + 1) - (A - 1) * c - t),
+                     (A + 1) + (A - 1) * c + t, -2 * ((A - 1) + (A + 1) * c), (A + 1) + (A - 1) * c - t);
+    }
+    static BiquadCoeffs highShelf (float fs, float f, float gainDb)
+    {
+        const float A = std::pow (10.0f, gainDb / 40.0f);
+        const float w = 2.0f * PI * clampF (f, fs) / fs, c = std::cos (w), s = std::sin (w);
+        const float t = 2.0f * std::sqrt (A) * (s * 0.70710678f);
+        return make (A * ((A + 1) + (A - 1) * c + t), -2 * A * ((A - 1) + (A + 1) * c), A * ((A + 1) + (A - 1) * c - t),
+                     (A + 1) - (A - 1) * c + t, 2 * ((A - 1) - (A + 1) * c), (A + 1) - (A - 1) * c - t);
+    }
+    // Réponse en amplitude (dB) à la fréquence f
+    float magnitudeDb (float fs, float f) const
+    {
+        const float w = 2.0f * PI * f / fs;
+        const float c1 = std::cos (w), s1 = std::sin (w), c2 = std::cos (2 * w), s2 = std::sin (2 * w);
+        const float nr = b0 + b1 * c1 + b2 * c2, ni = -(b1 * s1 + b2 * s2);
+        const float dr = 1 + a1 * c1 + a2 * c2,  di = -(a1 * s1 + a2 * s2);
+        return 10.0f * std::log10 (std::max (1.0e-12f, (nr * nr + ni * ni) / std::max (1.0e-12f, dr * dr + di * di)));
+    }
+};
+
+struct Biquad
+{
+    BiquadCoeffs c;
+    float z1[2] { 0, 0 }, z2[2] { 0, 0 };
+    void reset() { z1[0] = z1[1] = z2[0] = z2[1] = 0.0f; }
+    inline float process (int ch, float x)
+    {
+        const float y = c.b0 * x + z1[ch];
+        z1[ch] = c.b1 * x - c.a1 * y + z2[ch];
+        z2[ch] = c.b2 * x - c.a2 * y;
+        return y;
+    }
+};
+
+// ---------------------------------------------------------------------------
+//  Égaliseur : coupe-bas, plateau grave, 2 cloches, plateau aigu, coupe-haut
+// ---------------------------------------------------------------------------
+class ParametricEQ
+{
+public:
+    void prepare (double sampleRate) { sr = (float) sampleRate; reset(); }
+    void reset() { hp.reset(); ls.reset(); m1.reset(); m2.reset(); hs.reset(); lp.reset(); }
+
+    void setParams (float hpF, float lsF, float lsG, float m1F, float m1G, float m1Q,
+                    float m2F, float m2G, float m2Q, float hsF, float hsG, float lpF)
+    {
+        useHp = hpF > 21.0f;     useLp = lpF < 19500.0f;
+        useLs = std::fabs (lsG) > 0.05f;  use1 = std::fabs (m1G) > 0.05f;
+        use2  = std::fabs (m2G) > 0.05f;  useHs = std::fabs (hsG) > 0.05f;
+        hp.c = BiquadCoeffs::highpass (sr, hpF);
+        ls.c = BiquadCoeffs::lowShelf (sr, lsF, lsG);
+        m1.c = BiquadCoeffs::peak (sr, m1F, m1G, m1Q);
+        m2.c = BiquadCoeffs::peak (sr, m2F, m2G, m2Q);
+        hs.c = BiquadCoeffs::highShelf (sr, hsF, hsG);
+        lp.c = BiquadCoeffs::lowpass (sr, lpF);
+    }
+
+    inline void process (float& l, float& r)
+    {
+        float x[2] = { l, r };
+        for (int ch = 0; ch < 2; ++ch)
+        {
+            float v = x[ch];
+            if (useHp) v = hp.process (ch, v);
+            if (useLs) v = ls.process (ch, v);
+            if (use1)  v = m1.process (ch, v);
+            if (use2)  v = m2.process (ch, v);
+            if (useHs) v = hs.process (ch, v);
+            if (useLp) v = lp.process (ch, v);
+            x[ch] = v;
+        }
+        l = x[0]; r = x[1];
+    }
+
+private:
+    float sr = 44100.0f;
+    bool useHp = false, useLp = false, useLs = false, use1 = false, use2 = false, useHs = false;
+    Biquad hp, ls, m1, m2, hs, lp;
+};
+
+// ---------------------------------------------------------------------------
+//  Moteur de "gel" du son (vocodeur de phase figé) : sustain infini
+//  Le son est analysé par FFT, puis resynthétisé en continu avec des phases
+//  qui avancent à la fréquence exacte de chaque partiel -> note tenue stable.
+// ---------------------------------------------------------------------------
+class FreezeEngine
+{
+public:
+    static constexpr int N = 8192, HOP = N / 4, BINS = N / 2 + 1, RING = 16384;
+
+    void prepare (double sampleRate)
+    {
+        sr = (float) sampleRate;
+        fft.prepare (N);
+        ring.alloc (RING);  win.alloc (N);  re.alloc (N);  im.alloc (N);
+        m1.alloc (BINS);  p1.alloc (BINS);  cur.alloc (BINS);  target.alloc (BINS);
+        ph.alloc (BINS);  adv.alloc (BINS);  off.alloc (BINS);  nm.alloc (BINS);  np.alloc (BINS);  na.alloc (BINS);
+        olaL.alloc (N);  olaR.alloc (N);
+        for (int i = 0; i < N; ++i) win[i] = 0.5f - 0.5f * std::cos (2.0f * PI * (float) i / (float) N);
+        std::uint32_t s = 0x9E3779B9u;
+        for (int k = 0; k < BINS; ++k)
+        {
+            s ^= s << 13; s ^= s >> 17; s ^= s << 5;
+            off[k] = ((float) (s & 0xFFFFFF) / 16777216.0f - 0.5f) * PI * 0.9f;   // décorrélation stéréo fixe
+        }
+        wp = 0; stop();
+        setGlideMs (200.0f);
+    }
+
+    void stop()
+    {
+        active = false; outPos = 0; hopCount = 0;
+        if (olaL.n > 0) { std::fill (olaL.data(), olaL.data() + N, 0.0f); std::fill (olaR.data(), olaR.data() + N, 0.0f); }
+    }
+    bool isActive() const { return active; }
+
+    void setGlideMs (float ms)
+    {
+        const float hopSec = (float) HOP / sr;
+        glide = 1.0f - std::exp (-hopSec / std::max (0.005f, ms * 0.001f));
+    }
+
+    inline void pushInput (float x) { ring[wp] = x; wp = (wp + 1) & (RING - 1); }
+
+    // Fige les ~170 ms les plus récentes. layer = niveau conservé de l'ancien gel.
+    void capture (float layer)
+    {
+        // deux analyses espacées d'un HOP : modules et différence de phase
+        for (int f = 0; f < 2; ++f)
+        {
+            const int end = wp - (1 - f) * HOP;
+            for (int i = 0; i < N; ++i) { re[i] = ring[(end - N + i) & (RING - 1)] * win[i]; im[i] = 0.0f; }
+            fft.run (re.data(), im.data(), false);
+            for (int k = 0; k < BINS; ++k)
+            {
+                const float mg = std::sqrt (re[k] * re[k] + im[k] * im[k]);
+                const float pp = std::atan2 (im[k], re[k]);
+                if (f == 0) { m1[k] = mg; p1[k] = pp; }
+                else        { nm[k] = 0.5f * (mg + m1[k]); np[k] = pp; }
+            }
+        }
+        for (int k = 0; k < BINS; ++k)
+        {
+            const float expected = 0.5f * PI * (float) k;           // 2*pi*k*HOP/N
+            float dev = (np[k] - p1[k]) - expected;
+            dev -= 2.0f * PI * std::floor (dev / (2.0f * PI) + 0.5f);
+            na[k] = expected + dev;
+        }
+
+        float eNew = 0.0f;
+        for (int k = 0; k < BINS; ++k) eNew += nm[k] * nm[k];
+
+        if (! active)
+        {
+            for (int k = 0; k < BINS; ++k) { target[k] = cur[k] = nm[k]; adv[k] = na[k]; ph[k] = np[k] - na[k]; }
+            active = true;
+            std::fill (olaL.data(), olaL.data() + N, 0.0f);
+            std::fill (olaR.data(), olaR.data() + N, 0.0f);
+            outPos = 0;  hopCount = 0;
+            synthesize();
+        }
+        else
+        {
+            for (int k = 0; k < BINS; ++k)
+            {
+                const float old = layer * target[k];
+                if (nm[k] >= old) { adv[k] = na[k]; ph[k] = np[k] - na[k]; }     // le nouveau son domine ce partiel
+                target[k] = old + nm[k];
+            }
+        }
+        float eT = 0.0f;
+        for (int k = 0; k < BINS; ++k) eT += target[k] * target[k];
+        const float cap = 2.5f * eNew;
+        if (eT > cap && eT > 0.0f)
+        {
+            const float g = std::sqrt (cap / eT);
+            for (int k = 0; k < BINS; ++k) target[k] *= g;
+        }
+    }
+
+    inline void process (float& outL, float& outR)
+    {
+        outL = olaL[outPos];  outR = olaR[outPos];
+        olaL[outPos] = 0.0f;  olaR[outPos] = 0.0f;
+        outPos = (outPos + 1) & (N - 1);
+        if (++hopCount >= HOP) { hopCount = 0; synthesize(); }
+    }
+
+private:
+    static float wrapPi (float x) { return x - 2.0f * PI * std::floor (x / (2.0f * PI) + 0.5f); }
+
+    void synthesize()
+    {
+        for (int k = 0; k < BINS; ++k)
+        {
+            cur[k] += glide * (target[k] - cur[k]);
+            ph[k] = wrapPi (ph[k] + adv[k]);
+        }
+        const float scale = 1.0f / (1.5f * (float) N);
+        for (int ch = 0; ch < 2; ++ch)
+        {
+            re[0] = im[0] = 0.0f;  re[N / 2] = im[N / 2] = 0.0f;
+            for (int k = 1; k < N / 2; ++k)
+            {
+                const float a = ph[k] + (ch ? off[k] : 0.0f);
+                const float m = cur[k];
+                re[k] = m * std::cos (a);  im[k] = m * std::sin (a);
+                re[N - k] = re[k];         im[N - k] = -im[k];
+            }
+            fft.run (re.data(), im.data(), true);
+            float* ola = ch ? olaR.data() : olaL.data();
+            for (int i = 0; i < N; ++i) ola[(outPos + i) & (N - 1)] += re[i] * win[i] * scale;
+        }
+    }
+
+    float sr = 44100.0f, glide = 0.3f;
+    bool active = false;
+    int wp = 0, outPos = 0, hopCount = 0;
+    FFT fft;
+    FArr ring, win, re, im, m1, p1, cur, target, ph, adv, off, nm, np, na, olaL, olaR;
+};
+
+// ---------------------------------------------------------------------------
+//  Effets internes du Superego : Detune, Chorus, Tremolo, Filtre, Pitch
+// ---------------------------------------------------------------------------
+class SuperegoFx
+{
+public:
+    enum Type { Off = 0, Detune, Chorus, Tremolo, Filter, Pitch };
+
+    void prepare (double sampleRate)
+    {
+        sr = (float) sampleRate;
+        psL.prepare (sampleRate, 60.0f);  psR.prepare (sampleRate, 60.0f);
+        dL.prepare ((int) (0.06f * sr));  dR.prepare ((int) (0.06f * sr));
+        reset();
+    }
+    void reset() { psL.reset(); psR.reset(); dL.clear(); dR.clear(); lowL = bandL = lowR = bandR = 0.0f; phase = 0.0f; }
+
+    void setParams (int t, float rate01, float depth01)
+    {
+        type = t;  depth = depth01;
+        rateHz = 0.1f * std::pow (80.0f, rate01);        // 0.1 .. 8 Hz
+        lfoInc = rateHz / sr;
+    }
+
+    inline void process (float& l, float& r)
+    {
+        if (type == Off) return;
+        phase += lfoInc;  if (phase >= 1.0f) phase -= 1.0f;
+        const float s1 = std::sin (2.0f * PI * phase);
+        const float s2 = std::sin (2.0f * PI * (phase + 0.25f));
+        switch (type)
+        {
+            case Detune:
+            {
+                const float c = depth * 35.0f;
+                l = 0.5f * (l + psL.process (l, std::pow (2.0f, c / 1200.0f)));
+                r = 0.5f * (r + psR.process (r, std::pow (2.0f, -c / 1200.0f)));
+                break;
+            }
+            case Chorus:
+            {
+                const float base = 0.014f * sr, d = depth * 0.008f * sr;
+                const float yl = dL.read (base + d * s1);   dL.write (l);
+                const float yr = dR.read (base + d * s2);   dR.write (r);
+                l = 0.5f * (l + yl);  r = 0.5f * (r + yr);
+                break;
+            }
+            case Tremolo:
+            {
+                l *= 1.0f - depth * 0.5f * (1.0f + s1);
+                r *= 1.0f - depth * 0.5f * (1.0f + s2);
+                break;
+            }
+            case Filter:
+            {
+                const float fcL = 250.0f * std::pow (16.0f, 0.5f + 0.5f * depth * s1);
+                const float fcR = 250.0f * std::pow (16.0f, 0.5f + 0.5f * depth * s2);
+                const float fL = 2.0f * std::sin (PI * std::min (fcL, 0.2f * sr) / sr);
+                const float fR = 2.0f * std::sin (PI * std::min (fcR, 0.2f * sr) / sr);
+                const float q = 0.35f;
+                lowL += fL * bandL;  const float hL = l - lowL - q * bandL;  bandL += fL * hL;
+                lowR += fR * bandR;  const float hR = r - lowR - q * bandR;  bandR += fR * hR;
+                l = lowL * 1.4f;  r = lowR * 1.4f;
+                break;
+            }
+            case Pitch:
+            {
+                const float semis = std::round ((depth * 2.0f - 1.0f) * 12.0f);
+                const float ratio = std::pow (2.0f, semis / 12.0f);
+                l = psL.process (l, ratio);  r = psR.process (r, ratio);
+                break;
+            }
+            default: break;
+        }
+    }
+
+private:
+    float sr = 44100.0f, depth = 0.5f, rateHz = 1.0f, lfoInc = 0.0001f, phase = 0.0f;
+    float lowL = 0, bandL = 0, lowR = 0, bandR = 0;
+    int type = 0;
+    PitchShifter psL, psR;
+    DelayLine dL, dR;
+};
+
+// ---------------------------------------------------------------------------
+//  Superego : gel du son (Moment / Latch / Auto) ou effets en direct (Live)
+// ---------------------------------------------------------------------------
+class Superego
+{
+public:
+    enum Mode { Moment = 0, Latch, Auto, Live };
+
+    void prepare (double sampleRate)
+    {
+        sr = (float) sampleRate;
+        engine.prepare (sampleRate);
+        fx.prepare (sampleRate);
+        aF = coef (0.5f); rF = coef (25.0f); aS = coef (45.0f); rS = coef (250.0f);
+        dryS.prepare (sr, 30.0f);  effS.prepare (sr, 30.0f);
+        dryS.reset (1.0f);  effS.reset (0.9f);
+        reset();
+    }
+
+    void reset()
+    {
+        engine.stop();  fx.reset();
+        holding = false;  g = 0.0f;  prevFreeze = true;  autoArmed = false;
+        envF = envS = 0.0f;  armed = true;  holdoff = 0;  pending = -1;
+    }
+
+    void setParams (int modeIn, bool freezeOn, bool clearReq, float attackMs, float decayMs, float threshDb,
+                    float layerIn, float glideMs, int fxType, float rate01, float depth01, float dry, float effect)
+    {
+        if (modeIn != mode)
+        {
+            mode = modeIn;
+            holding = false; autoArmed = false; pending = -1;
+        }
+        thr = std::pow (10.0f, threshDb * 0.05f);
+        layer = layerIn;
+        attC = attackMs < 2.0f ? 1.0f : coef (attackMs / 3.0f);
+        decC = coef (std::max (5.0f, decayMs / 3.0f));
+        engine.setGlideMs (glideMs);
+        fx.setParams (fxType, rate01, depth01);
+        dryS.set (dry);  effS.set (effect);
+
+        const bool rising  = freezeOn && ! prevFreeze;
+        const bool falling = ! freezeOn && prevFreeze;
+        prevFreeze = freezeOn;
+
+        if (clearReq) { holding = false; autoArmed = false; pending = -1; }
+
+        switch (mode)
+        {
+            case Moment:
+                if (rising)  { engine.capture (layer); holding = true; }
+                if (falling) holding = false;
+                break;
+            case Latch:
+                if (rising)  { engine.capture (layer); holding = true; }
+                break;
+            case Auto:
+                if (rising)  autoArmed = true;
+                if (falling) { autoArmed = false; holding = false; pending = -1; }
+                break;
+            default:
+                holding = false; break;
+        }
+    }
+
+    inline void process (float& l, float& r)
+    {
+        const float m = 0.5f * (l + r);
+        engine.pushInput (m);
+
+        if (mode == Auto && autoArmed) detectOnset (std::max (std::fabs (l), std::fabs (r)));
+
+        float wl = 0.0f, wr = 0.0f;
+        if (mode == Live)
+        {
+            wl = l;  wr = r;
+        }
+        else if (engine.isActive())
+        {
+            const float tgt = holding ? 1.0f : 0.0f;
+            g += (tgt > g ? attC : decC) * (tgt - g);
+            if (! holding && g < 1.0e-4f) { g = 0.0f; engine.stop(); }
+            else
+            {
+                float el, er;
+                engine.process (el, er);
+                wl = el * g;  wr = er * g;
+            }
+        }
+        fx.process (wl, wr);
+        const float d = dryS.next(), e = effS.next();
+        l = l * d + wl * e;
+        r = r * d + wr * e;
+    }
+
+private:
+    float coef (float ms) const { return 1.0f - std::exp (-1.0f / (0.001f * ms * sr)); }
+
+    inline void detectOnset (float x)
+    {
+        envF += (x > envF ? aF : rF) * (x - envF);
+        envS += (x > envS ? aS : rS) * (x - envS);
+        if (holdoff > 0) --holdoff;
+        if (envF < thr * 0.5f) armed = true;
+        if (pending > 0 && --pending == 0)
+        {
+            engine.capture (layer);
+            holding = true;  pending = -1;
+        }
+        if (envF > thr && holdoff == 0 && (armed || envF > envS * 2.2f))
+        {
+            armed = false;
+            holdoff = (int) (0.25f * sr);
+            pending = (int) (0.18f * sr);        // on laisse la note s'installer avant de la figer
+        }
+    }
+
+    float sr = 44100.0f, thr = 0.01f, layer = 0.5f, g = 0.0f, attC = 0.001f, decC = 0.001f;
+    float aF = 0.1f, rF = 0.001f, aS = 0.001f, rS = 0.0001f, envF = 0.0f, envS = 0.0f;
+    int mode = 0, holdoff = 0, pending = -1;
+    bool holding = false, prevFreeze = true, autoArmed = false, armed = true;
+    FreezeEngine engine;
+    SuperegoFx fx;
+    Smoother dryS, effS;
 };
 
 } // namespace rv

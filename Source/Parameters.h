@@ -6,7 +6,7 @@ namespace ID
     // Global
     inline constexpr const char* inGain  = "inGain";
     inline constexpr const char* outGain = "outGain";
-    inline constexpr const char* slot[6] = { "slot1", "slot2", "slot3", "slot4", "slot5", "slot6" };
+    inline constexpr const char* slot[8] = { "slot1", "slot2", "slot3", "slot4", "slot5", "slot6", "slot7", "slot8" };
 
     // Swell
     inline constexpr const char* swOn = "swOn", *swSens = "swSens", *swAttack = "swAttack",
@@ -28,6 +28,14 @@ namespace ID
     inline constexpr const char* qdInt[4] = { "qdInt1", "qdInt2", "qdInt3", "qdInt4" };
     inline constexpr const char* qdLev[4] = { "qdLev1", "qdLev2", "qdLev3", "qdLev4" };
     inline constexpr const char* qdPan[4] = { "qdPan1", "qdPan2", "qdPan3", "qdPan4" };
+    // Superego (gel du son)
+    inline constexpr const char* sgOn = "sgOn", *sgMode = "sgMode", *sgFreeze = "sgFreeze", *sgAttack = "sgAttack",
+                                 *sgDecay = "sgDecay", *sgThresh = "sgThresh", *sgLayer = "sgLayer", *sgGlide = "sgGlide",
+                                 *sgFx = "sgFx", *sgRate = "sgRate", *sgDepth = "sgDepth", *sgDry = "sgDry", *sgEffect = "sgEffect";
+    // Egaliseur
+    inline constexpr const char* eqOn = "eqOn", *eqHp = "eqHp", *eqLsF = "eqLsF", *eqLsG = "eqLsG",
+                                 *eq1F = "eq1F", *eq1G = "eq1G", *eq1Q = "eq1Q", *eq2F = "eq2F", *eq2G = "eq2G", *eq2Q = "eq2Q",
+                                 *eqHsF = "eqHsF", *eqHsG = "eqHsG", *eqLp = "eqLp";
     // Compresseur
     inline constexpr const char* cpOn = "cpOn", *cpThresh = "cpThresh", *cpRatio = "cpRatio", *cpAttack = "cpAttack",
                                  *cpRelease = "cpRelease", *cpMakeup = "cpMakeup", *cpMix = "cpMix";
@@ -36,13 +44,16 @@ namespace ID
 namespace Params
 {
     // Modules (ordre = valeurs du choix dans les 6 "slots")
-    enum Module { Swell = 0, Reverb1, Shimmer, Delay, Quad, Comp, NumModules };
+    enum Module { Swell = 0, Reverb1, Shimmer, Superego, Delay, Quad, EQ, Comp, NumModules };
 
-    inline juce::StringArray moduleNames() { return { "Swell", "Reverb", "Shimmer", "Delay", "Quadravox", "Compressor" }; }
+    inline juce::StringArray moduleNames() { return { "Swell", "Reverb", "Shimmer", "Superego", "Delay", "Quadravox", "EQ", "Compressor" }; }
 
     // Valeurs rythmiques pour la synchro tempo (en temps / noires)
     inline juce::StringArray divisionNames() { return { "1/16", "1/8T", "1/8", "1/8.", "1/4T", "1/4", "1/4.", "1/2", "1/2.", "1 bar" }; }
     inline constexpr float divisionBeats[10] = { 0.25f, 1.0f / 3.0f, 0.5f, 0.75f, 2.0f / 3.0f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f };
+
+    inline juce::StringArray freezeModeNames() { return { "Moment", "Latch", "Auto", "Live" }; }
+    inline juce::StringArray superegoFxNames() { return { "Off", "Detune", "Chorus", "Tremolo", "Filter", "Pitch" }; }
 
     inline juce::StringArray shimmerNames() { return { "+1 oct", "+5th", "+oct +5th", "-1 oct", "+2 oct" }; }
     inline constexpr float shimmerSemis[5] = { 12.0f, 7.0f, 19.0f, -12.0f, 24.0f };
@@ -86,9 +97,9 @@ namespace Params
         L.add (F (ID::inGain,  "Input",  -24.0f, 24.0f, 0.0f, "dB", 1));
         L.add (F (ID::outGain, "Output", -24.0f, 12.0f, 0.0f, "dB", 1));
 
-        // Ordre par défaut : Swell > Quadravox > Delay > Reverb > Shimmer > Compresseur
-        const int defaultOrder[6] = { Swell, Quad, Delay, Reverb1, Shimmer, Comp };
-        for (int i = 0; i < 6; ++i)
+        // Ordre par défaut : Swell > Superego > Quadravox > Delay > Reverb > Shimmer > EQ > Compresseur
+        const int defaultOrder[8] = { Swell, Superego, Quad, Delay, Reverb1, Shimmer, EQ, Comp };
+        for (int i = 0; i < 8; ++i)
             L.add (C (ID::slot[i], ("Slot " + juce::String (i + 1)).toRawUTF8(), moduleNames(), defaultOrder[i]));
 
         // Swell
@@ -147,6 +158,36 @@ namespace Params
             L.add (F (ID::qdLev[v], ("Level " + juce::String (v + 1)).toRawUTF8(), 0.0f, 1.0f, defLev[v]));
             L.add (F (ID::qdPan[v], ("Pan " + juce::String (v + 1)).toRawUTF8(), -1.0f, 1.0f, defPan[v]));
         }
+
+        // Superego
+        L.add (B (ID::sgOn, "Superego On", true));
+        L.add (C (ID::sgMode, "Superego Mode", freezeModeNames(), 1));
+        L.add (B (ID::sgFreeze, "Freeze", false));
+        L.add (F (ID::sgAttack, "Attack", 0.0f, 5000.0f, 600.0f, "ms", 0, 500.0f));
+        L.add (F (ID::sgDecay,  "Decay", 50.0f, 8000.0f, 2000.0f, "ms", 0, 1000.0f));
+        L.add (F (ID::sgThresh, "Threshold", -60.0f, -10.0f, -38.0f, "dB", 0));
+        L.add (F (ID::sgLayer,  "Layer", 0.0f, 1.0f, 0.5f));
+        L.add (F (ID::sgGlide,  "Glide", 10.0f, 3000.0f, 250.0f, "ms", 0, 300.0f));
+        L.add (C (ID::sgFx, "Superego FX", superegoFxNames(), 0));
+        L.add (F (ID::sgRate,  "FX Rate", 0.0f, 1.0f, 0.4f));
+        L.add (F (ID::sgDepth, "FX Depth", 0.0f, 1.0f, 0.5f));
+        L.add (F (ID::sgDry,   "Dry", 0.0f, 1.5f, 1.0f));
+        L.add (F (ID::sgEffect, "Effect", 0.0f, 1.5f, 0.9f));
+
+        // Egaliseur
+        L.add (B (ID::eqOn, "EQ On", true));
+        L.add (F (ID::eqHp,  "Low Cut", 20.0f, 600.0f, 20.0f, "Hz", 0, 120.0f));
+        L.add (F (ID::eqLsF, "Low Freq", 40.0f, 800.0f, 150.0f, "Hz", 0, 200.0f));
+        L.add (F (ID::eqLsG, "Low Gain", -18.0f, 18.0f, 0.0f, "dB", 1));
+        L.add (F (ID::eq1F,  "Mid 1 Freq", 100.0f, 8000.0f, 500.0f, "Hz", 0, 800.0f));
+        L.add (F (ID::eq1G,  "Mid 1 Gain", -18.0f, 18.0f, 0.0f, "dB", 1));
+        L.add (F (ID::eq1Q,  "Mid 1 Q", 0.3f, 8.0f, 1.0f, {}, 2, 1.5f));
+        L.add (F (ID::eq2F,  "Mid 2 Freq", 300.0f, 12000.0f, 2500.0f, "Hz", 0, 2500.0f));
+        L.add (F (ID::eq2G,  "Mid 2 Gain", -18.0f, 18.0f, 0.0f, "dB", 1));
+        L.add (F (ID::eq2Q,  "Mid 2 Q", 0.3f, 8.0f, 1.0f, {}, 2, 1.5f));
+        L.add (F (ID::eqHsF, "High Freq", 1500.0f, 16000.0f, 6000.0f, "Hz", 0, 5000.0f));
+        L.add (F (ID::eqHsG, "High Gain", -18.0f, 18.0f, 0.0f, "dB", 1));
+        L.add (F (ID::eqLp,  "High Cut", 2000.0f, 20000.0f, 20000.0f, "Hz", 0, 7000.0f));
 
         // Compresseur
         L.add (B (ID::cpOn, "Comp On", true));

@@ -37,6 +37,8 @@ public:
     void positionComboBoxText (juce::ComboBox&, juce::Label&) override;
     void drawToggleButton (juce::Graphics&, juce::ToggleButton&, bool highlighted, bool down) override;
     juce::Font getLabelFont (juce::Label&) override { return serif (12.5f, true); }
+    void drawButtonBackground (juce::Graphics&, juce::Button&, const juce::Colour&, bool highlighted, bool down) override;
+    void drawButtonText (juce::Graphics&, juce::TextButton&, bool highlighted, bool down) override;
 };
 
 // Dessin décoratif (cadre, arches, halos, fleurs) – mis en cache dans une image
@@ -83,7 +85,34 @@ private:
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> att;
 };
 
-class ReverieEditor : public juce::AudioProcessorEditor
+// Bouton FREEZE : "momentané" en mode Moment (actif tant qu'on appuie), à bascule dans les autres modes
+class FreezeButton : public juce::TextButton
+{
+public:
+    FreezeButton (juce::AudioProcessorValueTreeState& apvts, const char* paramID, juce::Colour accent, std::function<bool()> isMomentary);
+    void mouseDown (const juce::MouseEvent&) override;
+    void mouseUp (const juce::MouseEvent&) override;
+private:
+    std::function<bool()> momentary;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> att;
+};
+
+// Courbe de réponse de l'égaliseur
+class EqCurve : public juce::Component, private juce::Timer
+{
+public:
+    EqCurve (juce::AudioProcessorValueTreeState& apvts, juce::Colour accent);
+    ~EqCurve() override { stopTimer(); }
+    void paint (juce::Graphics&) override;
+private:
+    void timerCallback() override;
+    float readSum() const;
+    juce::AudioProcessorValueTreeState& state;
+    juce::Colour colour;
+    float lastSum = -1.0f;
+};
+
+class ReverieEditor : public juce::AudioProcessorEditor, private juce::Timer
 {
 public:
     explicit ReverieEditor (ReverieProcessor&);
@@ -91,26 +120,36 @@ public:
     void resized() override;
 
 private:
-    Knob* addKnob (const char* id, const juce::String& label, juce::Colour accent);
-    Choice* addChoice (const char* id, const juce::String& label);
+    Knob* addKnob (const char* id, const juce::String& label, juce::Colour accent, int module);
+    Choice* addChoice (const char* id, const juce::String& label, int module = -1);
     Gem* addGem (const char* id, const juce::String& text, juce::Colour accent);
+    void layoutContent();
+    void timerCallback() override;
 
     ReverieProcessor& proc;
     MuchaLookAndFeel laf;
+    juce::Component content;          // dessiné à taille fixe puis mis à l'échelle (fenêtre redimensionnable)
     ArtComponent art;
     juce::OwnedArray<Knob> knobs;
     juce::OwnedArray<Choice> choices;
     juce::OwnedArray<Gem> gems;
+    std::vector<juce::Component*> groups[Params::NumModules];
+    int lastEnabled[Params::NumModules];
 
-    // pointeurs de mise en page
     Knob *inK, *outK;
-    Choice* slot[6];
-    Gem *swGem, *r1Gem, *r2Gem, *dlGem, *qdGem, *cpGem, *syncGem;
+    Choice* slot[Params::NumModules];
+    Gem *swGem, *r1Gem, *r2Gem, *sgGem, *dlGem, *qdGem, *eqGem, *cpGem, *syncGem;
     Knob *swK[5], *r1K[6], *r2K[7];
     Choice* r2Int;
+    Knob *sgK[9];
+    Choice *sgMode, *sgFx;
+    std::unique_ptr<FreezeButton> freezeBtn;
+    juce::TextButton clearBtn { "CLEAR" };
     Knob *dlK[10];
     Choice *dlDivL, *dlDivR;
     Knob *qdK[12], *qdMix;
+    Knob *eqK[12];
+    std::unique_ptr<EqCurve> eqCurve;
     Knob *cpK[6];
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (ReverieEditor)

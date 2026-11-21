@@ -25,6 +25,8 @@ void ReverieProcessor::prepareToPlay (double sr, int)
     reverb1.prepare (sr, 0);
     shimmer.prepare (sr);
     delay.prepare (sr);
+    superego.prepare (sr);
+    eq.prepare (sr);
     quad.prepare (sr);
     comp.prepare (sr);
     inSm.prepare (sr, 30.0f);   inSm.reset (rv::dbToGain (val (ID::inGain)));
@@ -76,6 +78,14 @@ void ReverieProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
     for (int v = 0; v < 4; ++v) { semis[v] = val (ID::qdInt[v]); lev[v] = val (ID::qdLev[v]); pan[v] = val (ID::qdPan[v]); }
     quad.setParams (semis, lev, pan, val (ID::qdMix));
 
+    const bool clearReq = sgClear.exchange (false);
+    if (on (ID::sgOn))
+        superego.setParams ((int) val (ID::sgMode), on (ID::sgFreeze), clearReq, val (ID::sgAttack), val (ID::sgDecay),
+                            val (ID::sgThresh), val (ID::sgLayer), val (ID::sgGlide), (int) val (ID::sgFx),
+                            val (ID::sgRate), val (ID::sgDepth), val (ID::sgDry), val (ID::sgEffect));
+    eq.setParams (val (ID::eqHp), val (ID::eqLsF), val (ID::eqLsG), val (ID::eq1F), val (ID::eq1G), val (ID::eq1Q),
+                  val (ID::eq2F), val (ID::eq2G), val (ID::eq2Q), val (ID::eqHsF), val (ID::eqHsG), val (ID::eqLp));
+
     comp.setParams (val (ID::cpThresh), val (ID::cpRatio), val (ID::cpAttack), val (ID::cpRelease),
                     val (ID::cpMakeup), val (ID::cpMix));
 
@@ -83,7 +93,7 @@ void ReverieProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
     int order[Params::NumModules];
     bool used[Params::NumModules] {};
     int count = 0;
-    for (int s = 0; s < 6; ++s)
+    for (int s = 0; s < Params::NumModules; ++s)
     {
         const int m = juce::jlimit (0, Params::NumModules - 1, (int) val (ID::slot[s]));
         if (! used[m]) { used[m] = true; order[count++] = m; }
@@ -91,11 +101,13 @@ void ReverieProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
     for (int m = 0; m < Params::NumModules; ++m)
         if (! used[m]) order[count++] = m;
 
-    const bool enabled[Params::NumModules] = { on (ID::swOn), on (ID::r1On), on (ID::r2On),
-                                               on (ID::dlOn), on (ID::qdOn), on (ID::cpOn) };
+    const bool enabled[Params::NumModules] = { on (ID::swOn), on (ID::r1On), on (ID::r2On), on (ID::sgOn),
+                                               on (ID::dlOn), on (ID::qdOn), on (ID::eqOn), on (ID::cpOn) };
     if (enabled[Params::Swell]   && ! wasOn[Params::Swell])   swell.reset();
     if (enabled[Params::Reverb1] && ! wasOn[Params::Reverb1]) reverb1.reset();
     if (enabled[Params::Shimmer] && ! wasOn[Params::Shimmer]) shimmer.reset();
+    if (enabled[Params::Superego] && ! wasOn[Params::Superego]) superego.reset();
+    if (enabled[Params::EQ]      && ! wasOn[Params::EQ])      eq.reset();
     if (enabled[Params::Delay]   && ! wasOn[Params::Delay])   delay.reset();
     if (enabled[Params::Quad]    && ! wasOn[Params::Quad])    quad.reset();
     for (int m = 0; m < Params::NumModules; ++m) wasOn[m] = enabled[m];
@@ -130,6 +142,8 @@ void ReverieProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
                     r[i] = r[i] * dry + wr * wet;
                 }
                 break;
+            case Params::Superego: for (int i = 0; i < n; ++i) superego.process (l[i], r[i]); break;
+            case Params::EQ:      for (int i = 0; i < n; ++i) eq.process (l[i], r[i]); break;
             case Params::Delay:   for (int i = 0; i < n; ++i) delay.process (l[i], r[i]); break;
             case Params::Quad:    for (int i = 0; i < n; ++i) quad.process (l[i], r[i]); break;
             case Params::Comp:    for (int i = 0; i < n; ++i) comp.process (l[i], r[i]); break;

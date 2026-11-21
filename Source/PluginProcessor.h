@@ -34,6 +34,9 @@ public:
 
     juce::AudioProcessorValueTreeState apvts;
 
+    // Appelé par le bouton CLEAR de l'interface : fait disparaître le son gelé
+    void requestSuperegoClear() { sgClear.store (true); }
+
 private:
     std::atomic<float>* raw (const char* id) const { return apvts.getRawParameterValue (id); }
     float val (const char* id) const { return raw (id)->load(); }
@@ -43,11 +46,14 @@ private:
     rv::Reverb reverb1;
     rv::ShimmerReverb shimmer;
     rv::StereoDelay delay;
+    rv::Superego superego;
+    rv::ParametricEQ eq;
     rv::Quadravox quad;
     rv::Compressor comp;
     rv::Smoother inSm, outSm, r1MixSm, r2MixSm;
 
-    bool wasOn[Params::NumModules] { true, true, true, true, true, true };
+    std::atomic<bool> sgClear { false };
+    bool wasOn[Params::NumModules] { true, true, true, true, true, true, true, true };
     double sampleRate = 44100.0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (ReverieProcessor)

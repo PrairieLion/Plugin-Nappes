@@ -4,8 +4,8 @@ using namespace juce;
 
 namespace
 {
-    constexpr int kW = 1280, kH = 780, kMargin = 22;
-    constexpr int kStripLabelW = 170, kStripComboW = 150, kStripGap = 30;
+    constexpr int kW = 1500, kH = 1030, kMargin = 22;
+    constexpr int kStripLabelW = 160, kStripComboW = 130, kStripGap = 28;
 
     String pickSerifName()
     {
@@ -195,7 +195,7 @@ void MuchaLookAndFeel::drawToggleButton (Graphics& g, ToggleButton& b, bool high
 {
     const auto accent = b.findColour (ToggleButton::tickColourId);
     auto area = b.getLocalBounds().toFloat();
-    const float d = jmin (area.getHeight(), 22.0f);
+    const float d = jmin (area.getHeight(), 26.0f);
     Rectangle<float> gem (area.getX() + 1.0f, area.getCentreY() - d * 0.5f, d, d);
     const bool on = b.getToggleState();
 
@@ -222,6 +222,32 @@ void MuchaLookAndFeel::drawToggleButton (Graphics& g, ToggleButton& b, bool high
     }
 }
 
+void MuchaLookAndFeel::drawButtonBackground (Graphics& g, Button& b, const Colour&, bool highlighted, bool down)
+{
+    auto r = b.getLocalBounds().toFloat().reduced (1.5f);
+    const bool on = b.getToggleState() || down;
+    const auto accent = b.findColour (TextButton::buttonOnColourId);
+    g.setColour (Pal::brown.withAlpha (0.25f));
+    g.fillRoundedRectangle (r.translated (1.0f, 2.0f), 9.0f);
+    if (on)
+        g.setGradientFill (ColourGradient (accent.brighter (0.5f), r.getX(), r.getY(), accent.darker (0.25f), r.getX(), r.getBottom(), false));
+    else
+        g.setGradientFill (ColourGradient (Pal::paper, r.getX(), r.getY(), Pal::parchment2, r.getX(), r.getBottom(), false));
+    g.fillRoundedRectangle (r, 9.0f);
+    g.setColour (Pal::gold);
+    g.drawRoundedRectangle (r, 9.0f, highlighted ? 2.6f : 2.0f);
+    g.setColour (Pal::brown.withAlpha (0.5f));
+    g.drawRoundedRectangle (r.reduced (3.0f), 7.0f, 0.7f);
+}
+
+void MuchaLookAndFeel::drawButtonText (Graphics& g, TextButton& b, bool, bool down)
+{
+    const bool on = b.getToggleState() || down;
+    g.setFont (serif (14.0f, true).withExtraKerningFactor (0.12f));
+    g.setColour (on ? Pal::paper : Pal::brown);
+    g.drawText (b.getButtonText(), b.getLocalBounds(), Justification::centred);
+}
+
 // ============================================================================
 //  Petits composants
 // ============================================================================
@@ -232,6 +258,10 @@ Knob::Knob (AudioProcessorValueTreeState& apvts, const char* paramID, const Stri
     slider.setColour (Slider::rotarySliderFillColourId, accent);
     slider.setRotaryParameters (1.25f * MathConstants<float>::pi, 2.75f * MathConstants<float>::pi, true);
     slider.setPopupDisplayEnabled (false, false, nullptr);
+    slider.setColour (Slider::textBoxTextColourId, Pal::brown);
+    slider.setColour (Slider::textBoxBackgroundColourId, Colours::transparentBlack);
+    slider.setColour (Slider::textBoxOutlineColourId, Colours::transparentBlack);
+    slider.setColour (Slider::textBoxHighlightColourId, Pal::goldLight);
     name.setText (label, dontSendNotification);
     name.setJustificationType (Justification::centred);
     name.setInterceptsMouseClicks (false, false);
@@ -278,6 +308,108 @@ Gem::Gem (AudioProcessorValueTreeState& apvts, const char* paramID, const String
     setButtonText (caption);
     setColour (ToggleButton::tickColourId, accent);
     att = std::make_unique<AudioProcessorValueTreeState::ButtonAttachment> (apvts, paramID, *this);
+}
+
+FreezeButton::FreezeButton (AudioProcessorValueTreeState& apvts, const char* paramID, Colour accent, std::function<bool()> isMomentary)
+    : TextButton ("FREEZE"), momentary (std::move (isMomentary))
+{
+    setClickingTogglesState (false);
+    setColour (TextButton::buttonOnColourId, accent);
+    att = std::make_unique<AudioProcessorValueTreeState::ButtonAttachment> (apvts, paramID, *this);
+}
+
+void FreezeButton::mouseDown (const MouseEvent&)
+{
+    if (! isEnabled()) return;
+    if (momentary()) setToggleState (true, sendNotification);
+    else             setToggleState (! getToggleState(), sendNotification);
+}
+
+void FreezeButton::mouseUp (const MouseEvent&)
+{
+    if (isEnabled() && momentary()) setToggleState (false, sendNotification);
+}
+
+// ---------------------------------------------------------------------------
+EqCurve::EqCurve (AudioProcessorValueTreeState& apvts, Colour accent) : state (apvts), colour (accent)
+{
+    setInterceptsMouseClicks (false, false);
+    startTimerHz (15);
+}
+
+float EqCurve::readSum() const
+{
+    float s = 0.0f, k = 1.0f;
+    for (auto id : { ID::eqHp, ID::eqLsF, ID::eqLsG, ID::eq1F, ID::eq1G, ID::eq1Q, ID::eq2F, ID::eq2G, ID::eq2Q,
+                     ID::eqHsF, ID::eqHsG, ID::eqLp })
+    {
+        s += state.getRawParameterValue (id)->load() * k;
+        k *= 1.37f;
+    }
+    return s;
+}
+
+void EqCurve::timerCallback()
+{
+    const float s = readSum();
+    if (s != lastSum) { lastSum = s; repaint(); }
+}
+
+void EqCurve::paint (Graphics& g)
+{
+    auto v = [this] (const char* id) { return state.getRawParameterValue (id)->load(); };
+    const float fs = 48000.0f;
+    std::vector<rv::BiquadCoeffs> stages;
+    if (v (ID::eqHp) > 21.0f)            stages.push_back (rv::BiquadCoeffs::highpass (fs, v (ID::eqHp)));
+    if (std::fabs (v (ID::eqLsG)) > 0.05f) stages.push_back (rv::BiquadCoeffs::lowShelf (fs, v (ID::eqLsF), v (ID::eqLsG)));
+    if (std::fabs (v (ID::eq1G)) > 0.05f)  stages.push_back (rv::BiquadCoeffs::peak (fs, v (ID::eq1F), v (ID::eq1G), v (ID::eq1Q)));
+    if (std::fabs (v (ID::eq2G)) > 0.05f)  stages.push_back (rv::BiquadCoeffs::peak (fs, v (ID::eq2F), v (ID::eq2G), v (ID::eq2Q)));
+    if (std::fabs (v (ID::eqHsG)) > 0.05f) stages.push_back (rv::BiquadCoeffs::highShelf (fs, v (ID::eqHsF), v (ID::eqHsG)));
+    if (v (ID::eqLp) < 19500.0f)         stages.push_back (rv::BiquadCoeffs::lowpass (fs, v (ID::eqLp)));
+
+    auto r = getLocalBounds().toFloat().reduced (1.0f);
+    g.setColour (Pal::paper);
+    g.fillRoundedRectangle (r, 8.0f);
+    g.setColour (Pal::gold);
+    g.drawRoundedRectangle (r, 8.0f, 1.8f);
+
+    const auto a = r.reduced (10.0f, 10.0f);
+    auto xOf = [&] (float f) { return a.getX() + a.getWidth() * std::log (f / 20.0f) / std::log (1000.0f); };
+    auto yOf = [&] (float db) { return a.getCentreY() - jlimit (-20.0f, 20.0f, db) / 18.0f * a.getHeight() * 0.5f; };
+
+    g.setColour (Pal::brown.withAlpha (0.13f));
+    for (float f : { 50.0f, 100.0f, 200.0f, 500.0f, 1000.0f, 2000.0f, 5000.0f, 10000.0f })
+        g.drawVerticalLine ((int) xOf (f), a.getY(), a.getBottom());
+    for (float db : { -12.0f, -6.0f, 6.0f, 12.0f })
+        g.drawHorizontalLine ((int) yOf (db), a.getX(), a.getRight());
+    g.setColour (Pal::brown.withAlpha (0.45f));
+    g.drawHorizontalLine ((int) yOf (0.0f), a.getX(), a.getRight());
+
+    g.setFont (MuchaLookAndFeel::serif (10.5f));
+    g.setColour (Pal::brown.withAlpha (0.7f));
+    const float lblF[3] = { 100.0f, 1000.0f, 10000.0f };
+    const char* lblT[3] = { "100", "1k", "10k" };
+    for (int i = 0; i < 3; ++i)
+        g.drawText (lblT[i], Rectangle<float> (xOf (lblF[i]) - 16.0f, a.getBottom() - 12.0f, 32.0f, 12.0f), Justification::centred);
+
+    Path curve;
+    const int steps = 160;
+    for (int i = 0; i < steps; ++i)
+    {
+        const float f = 20.0f * std::pow (1000.0f, (float) i / (float) (steps - 1));
+        float db = 0.0f;
+        for (auto& s : stages) db += s.magnitudeDb (fs, f);
+        const float x = xOf (f), y = yOf (db);
+        if (i == 0) curve.startNewSubPath (x, y); else curve.lineTo (x, y);
+    }
+    Path fill (curve);
+    fill.lineTo (a.getRight(), yOf (0.0f));
+    fill.lineTo (a.getX(), yOf (0.0f));
+    fill.closeSubPath();
+    g.setColour (colour.withAlpha (0.22f));
+    g.fillPath (fill);
+    g.setColour (colour.darker (0.2f));
+    g.strokePath (curve, PathStrokeType (2.2f, PathStrokeType::curved, PathStrokeType::rounded));
 }
 
 // ============================================================================
@@ -345,7 +477,7 @@ void ArtComponent::paint (Graphics& g)
         g.setColour (Pal::brown);
         g.setFont (MuchaLookAndFeel::serif (15.0f, true).withExtraKerningFactor (0.12f));
         g.drawText ("SIGNAL PATH", stripRect.withTrimmedLeft (22.0f).withWidth ((float) kStripLabelW - 22.0f), Justification::centredLeft);
-        for (int i = 1; i < 6; ++i)
+        for (int i = 1; i < Params::NumModules; ++i)
         {
             const float cx = stripRect.getX() + (float) kStripLabelW + (float) (i * kStripComboW + (i - 1) * kStripGap) + (float) kStripGap * 0.5f;
             Path arrow;
@@ -397,154 +529,240 @@ void ArtComponent::paint (Graphics& g)
 // ============================================================================
 //  Editeur
 // ============================================================================
-Knob* ReverieEditor::addKnob (const char* id, const String& label, Colour accent)
+Knob* ReverieEditor::addKnob (const char* id, const String& label, Colour accent, int module)
 {
     auto* k = knobs.add (new Knob (proc.apvts, id, label, accent));
-    addAndMakeVisible (k);
+    content.addAndMakeVisible (k);
+    if (module >= 0) groups[module].push_back (k);
     return k;
 }
-Choice* ReverieEditor::addChoice (const char* id, const String& label)
+Choice* ReverieEditor::addChoice (const char* id, const String& label, int module)
 {
     auto* c = choices.add (new Choice (proc.apvts, id, label));
-    addAndMakeVisible (c);
+    content.addAndMakeVisible (c);
+    if (module >= 0) groups[module].push_back (c);
     return c;
 }
 Gem* ReverieEditor::addGem (const char* id, const String& text, Colour accent)
 {
     auto* g = gems.add (new Gem (proc.apvts, id, text, accent));
-    addAndMakeVisible (g);
+    content.addAndMakeVisible (g);
     return g;
 }
 
 ReverieEditor::ReverieEditor (ReverieProcessor& p) : AudioProcessorEditor (&p), proc (p)
 {
+    using M = Params::Module;
+    for (auto& e : lastEnabled) e = -1;
     setLookAndFeel (&laf);
-    addAndMakeVisible (art);
+    addAndMakeVisible (content);
+    content.addAndMakeVisible (art);
 
-    inK  = addKnob (ID::inGain,  "Input",  Pal::gold);
-    outK = addKnob (ID::outGain, "Output", Pal::gold);
-    for (int i = 0; i < 6; ++i) slot[i] = addChoice (ID::slot[i], {});
+    inK  = addKnob (ID::inGain,  "Input",  Pal::gold, -1);
+    outK = addKnob (ID::outGain, "Output", Pal::gold, -1);
+    for (int i = 0; i < Params::NumModules; ++i) slot[i] = addChoice (ID::slot[i], {});
 
     // Swell
-    swGem = addGem (ID::swOn, {}, Pal::olive);
-    swK[0] = addKnob (ID::swSens,    "Sensitivity", Pal::olive);
-    swK[1] = addKnob (ID::swAttack,  "Attack",      Pal::olive);
-    swK[2] = addKnob (ID::swRelease, "Release",     Pal::olive);
-    swK[3] = addKnob (ID::swDepth,   "Depth",       Pal::olive);
-    swK[4] = addKnob (ID::swShape,   "Shape",       Pal::olive);
+    swGem = addGem (ID::swOn, "ON", Pal::olive);
+    swK[0] = addKnob (ID::swSens,    "Sensitivity", Pal::olive, M::Swell);
+    swK[1] = addKnob (ID::swAttack,  "Attack",      Pal::olive, M::Swell);
+    swK[2] = addKnob (ID::swRelease, "Release",     Pal::olive, M::Swell);
+    swK[3] = addKnob (ID::swDepth,   "Depth",       Pal::olive, M::Swell);
+    swK[4] = addKnob (ID::swShape,   "Shape",       Pal::olive, M::Swell);
 
     // Reverb 1
-    r1Gem = addGem (ID::r1On, {}, Pal::teal);
-    r1K[0] = addKnob (ID::r1Size,  "Size",  Pal::teal);
-    r1K[1] = addKnob (ID::r1Decay, "Decay", Pal::teal);
-    r1K[2] = addKnob (ID::r1Damp,  "Damp",  Pal::teal);
-    r1K[3] = addKnob (ID::r1Pre,   "Pre-delay", Pal::teal);
-    r1K[4] = addKnob (ID::r1Mod,   "Mod",   Pal::teal);
-    r1K[5] = addKnob (ID::r1Mix,   "Mix",   Pal::teal);
+    r1Gem = addGem (ID::r1On, "ON", Pal::teal);
+    r1K[0] = addKnob (ID::r1Size,  "Size",  Pal::teal, M::Reverb1);
+    r1K[1] = addKnob (ID::r1Decay, "Decay", Pal::teal, M::Reverb1);
+    r1K[2] = addKnob (ID::r1Damp,  "Damp",  Pal::teal, M::Reverb1);
+    r1K[3] = addKnob (ID::r1Pre,   "Pre-delay", Pal::teal, M::Reverb1);
+    r1K[4] = addKnob (ID::r1Mod,   "Mod",   Pal::teal, M::Reverb1);
+    r1K[5] = addKnob (ID::r1Mix,   "Mix",   Pal::teal, M::Reverb1);
 
     // Shimmer
-    r2Gem = addGem (ID::r2On, {}, Pal::rose);
-    r2K[0] = addKnob (ID::r2Size,  "Size",  Pal::rose);
-    r2K[1] = addKnob (ID::r2Decay, "Decay", Pal::rose);
-    r2K[2] = addKnob (ID::r2Damp,  "Damp",  Pal::rose);
-    r2K[3] = addKnob (ID::r2Pre,   "Pre-delay", Pal::rose);
-    r2K[4] = addKnob (ID::r2Mod,   "Mod",   Pal::rose);
-    r2K[5] = addKnob (ID::r2Mix,   "Mix",   Pal::rose);
-    r2K[6] = addKnob (ID::r2Shim,  "Shimmer", Pal::ochre);
-    r2Int  = addChoice (ID::r2Int, "Interval");
+    r2Gem = addGem (ID::r2On, "ON", Pal::rose);
+    r2K[0] = addKnob (ID::r2Size,  "Size",  Pal::rose, M::Shimmer);
+    r2K[1] = addKnob (ID::r2Decay, "Decay", Pal::rose, M::Shimmer);
+    r2K[2] = addKnob (ID::r2Damp,  "Damp",  Pal::rose, M::Shimmer);
+    r2K[3] = addKnob (ID::r2Pre,   "Pre-delay", Pal::rose, M::Shimmer);
+    r2K[4] = addKnob (ID::r2Mod,   "Mod",   Pal::rose, M::Shimmer);
+    r2K[5] = addKnob (ID::r2Mix,   "Mix",   Pal::rose, M::Shimmer);
+    r2K[6] = addKnob (ID::r2Shim,  "Shimmer", Pal::ochre, M::Shimmer);
+    r2Int  = addChoice (ID::r2Int, "Interval", M::Shimmer);
+
+    // Superego
+    sgGem = addGem (ID::sgOn, "ON", Pal::plum);
+    sgMode = addChoice (ID::sgMode, "Mode", M::Superego);
+    sgFx   = addChoice (ID::sgFx,   "FX",   M::Superego);
+    sgK[0] = addKnob (ID::sgAttack, "Attack",    Pal::plum, M::Superego);
+    sgK[1] = addKnob (ID::sgDecay,  "Decay",     Pal::plum, M::Superego);
+    sgK[2] = addKnob (ID::sgThresh, "Threshold", Pal::plum, M::Superego);
+    sgK[3] = addKnob (ID::sgLayer,  "Layer",     Pal::plum, M::Superego);
+    sgK[4] = addKnob (ID::sgGlide,  "Glide",     Pal::plum, M::Superego);
+    sgK[5] = addKnob (ID::sgRate,   "FX Rate",   Pal::ochre, M::Superego);
+    sgK[6] = addKnob (ID::sgDepth,  "FX Depth",  Pal::ochre, M::Superego);
+    sgK[7] = addKnob (ID::sgDry,    "Dry",       Pal::plum, M::Superego);
+    sgK[8] = addKnob (ID::sgEffect, "Effect",    Pal::plum, M::Superego);
+    freezeBtn = std::make_unique<FreezeButton> (proc.apvts, ID::sgFreeze, Pal::sky,
+                    [this] { return (int) proc.apvts.getRawParameterValue (ID::sgMode)->load() == (int) rv::Superego::Moment; });
+    content.addAndMakeVisible (*freezeBtn);
+    groups[M::Superego].push_back (freezeBtn.get());
+    clearBtn.setColour (TextButton::buttonOnColourId, Pal::rose);
+    clearBtn.onClick = [this] { proc.requestSuperegoClear(); };
+    content.addAndMakeVisible (clearBtn);
+    groups[M::Superego].push_back (&clearBtn);
 
     // Delay
-    dlGem   = addGem (ID::dlOn, {}, Pal::plum);
+    dlGem   = addGem (ID::dlOn, "ON", Pal::plum);
     syncGem = addGem (ID::dlSync, "SYNC", Pal::plum);
-    dlK[0] = addKnob (ID::dlTimeL, "Time L",  Pal::plum);
-    dlK[1] = addKnob (ID::dlFbL,   "Feedback L", Pal::plum);
-    dlK[2] = addKnob (ID::dlLevL,  "Level L", Pal::plum);
-    dlK[3] = addKnob (ID::dlTimeR, "Time R",  Pal::sky);
-    dlK[4] = addKnob (ID::dlFbR,   "Feedback R", Pal::sky);
-    dlK[5] = addKnob (ID::dlLevR,  "Level R", Pal::sky);
-    dlK[6] = addKnob (ID::dlCross, "Cross",   Pal::plum);
-    dlK[7] = addKnob (ID::dlTone,  "Tone",    Pal::plum);
-    dlK[8] = addKnob (ID::dlMod,   "Mod",     Pal::plum);
-    dlK[9] = addKnob (ID::dlMix,   "Mix",     Pal::plum);
-    dlDivL = addChoice (ID::dlDivL, "Div L");
-    dlDivR = addChoice (ID::dlDivR, "Div R");
+    dlK[0] = addKnob (ID::dlTimeL, "Time L",  Pal::plum, M::Delay);
+    dlK[1] = addKnob (ID::dlFbL,   "Feedback L", Pal::plum, M::Delay);
+    dlK[2] = addKnob (ID::dlLevL,  "Level L", Pal::plum, M::Delay);
+    dlK[3] = addKnob (ID::dlTimeR, "Time R",  Pal::sky, M::Delay);
+    dlK[4] = addKnob (ID::dlFbR,   "Feedback R", Pal::sky, M::Delay);
+    dlK[5] = addKnob (ID::dlLevR,  "Level R", Pal::sky, M::Delay);
+    dlK[6] = addKnob (ID::dlCross, "Cross",   Pal::plum, M::Delay);
+    dlK[7] = addKnob (ID::dlTone,  "Tone",    Pal::plum, M::Delay);
+    dlK[8] = addKnob (ID::dlMod,   "Mod",     Pal::plum, M::Delay);
+    dlK[9] = addKnob (ID::dlMix,   "Mix",     Pal::plum, M::Delay);
+    dlDivL = addChoice (ID::dlDivL, "Div L", M::Delay);
+    dlDivR = addChoice (ID::dlDivR, "Div R", M::Delay);
 
     // Quadravox
-    qdGem = addGem (ID::qdOn, {}, Pal::sky);
+    qdGem = addGem (ID::qdOn, "ON", Pal::sky);
     for (int v = 0; v < 4; ++v)
     {
         const String n = String (v + 1);
-        qdK[v * 3 + 0] = addKnob (ID::qdInt[v], "Pitch " + n, Pal::sky);
-        qdK[v * 3 + 1] = addKnob (ID::qdLev[v], "Level " + n, Pal::sky);
-        qdK[v * 3 + 2] = addKnob (ID::qdPan[v], "Pan " + n,   Pal::sky);
+        qdK[v * 3 + 0] = addKnob (ID::qdInt[v], "Pitch " + n, Pal::sky, M::Quad);
+        qdK[v * 3 + 1] = addKnob (ID::qdLev[v], "Level " + n, Pal::sky, M::Quad);
+        qdK[v * 3 + 2] = addKnob (ID::qdPan[v], "Pan " + n,   Pal::sky, M::Quad);
     }
-    qdMix = addKnob (ID::qdMix, "Mix", Pal::sky);
+    qdMix = addKnob (ID::qdMix, "Mix", Pal::sky, M::Quad);
+
+    // Egaliseur
+    eqGem = addGem (ID::eqOn, "ON", Pal::teal);
+    const char* eqIds[12]    = { ID::eqHp, ID::eqLsF, ID::eqLsG, ID::eq1F, ID::eq1G, ID::eq1Q, ID::eq2F, ID::eq2G, ID::eq2Q, ID::eqHsF, ID::eqHsG, ID::eqLp };
+    const char* eqLabels[12] = { "Low Cut", "Low Freq", "Low Gain", "Mid1 Freq", "Mid1 Gain", "Mid1 Q", "Mid2 Freq", "Mid2 Gain", "Mid2 Q", "High Freq", "High Gain", "High Cut" };
+    for (int i = 0; i < 12; ++i) eqK[i] = addKnob (eqIds[i], eqLabels[i], Pal::teal, M::EQ);
+    eqCurve = std::make_unique<EqCurve> (proc.apvts, Pal::teal);
+    content.addAndMakeVisible (*eqCurve);
+    groups[M::EQ].push_back (eqCurve.get());
 
     // Compresseur
-    cpGem = addGem (ID::cpOn, {}, Pal::ochre);
-    cpK[0] = addKnob (ID::cpThresh,  "Threshold", Pal::ochre);
-    cpK[1] = addKnob (ID::cpRatio,   "Ratio",     Pal::ochre);
-    cpK[2] = addKnob (ID::cpAttack,  "Attack",    Pal::ochre);
-    cpK[3] = addKnob (ID::cpRelease, "Release",   Pal::ochre);
-    cpK[4] = addKnob (ID::cpMakeup,  "Makeup",    Pal::ochre);
-    cpK[5] = addKnob (ID::cpMix,     "Mix",       Pal::ochre);
+    cpGem = addGem (ID::cpOn, "ON", Pal::ochre);
+    cpK[0] = addKnob (ID::cpThresh,  "Threshold", Pal::ochre, M::Comp);
+    cpK[1] = addKnob (ID::cpRatio,   "Ratio",     Pal::ochre, M::Comp);
+    cpK[2] = addKnob (ID::cpAttack,  "Attack",    Pal::ochre, M::Comp);
+    cpK[3] = addKnob (ID::cpRelease, "Release",   Pal::ochre, M::Comp);
+    cpK[4] = addKnob (ID::cpMakeup,  "Makeup",    Pal::ochre, M::Comp);
+    cpK[5] = addKnob (ID::cpMix,     "Mix",       Pal::ochre, M::Comp);
 
-    setSize (kW, kH);   // en dernier : déclenche resized() une fois tous les contrôles créés
+    layoutContent();
+
+    // fenêtre redimensionnable (proportions conservées)
+    setResizable (true, true);
+    getConstrainer()->setFixedAspectRatio ((double) kW / (double) kH);
+    setResizeLimits (kW / 2, kH / 2, kW * 3 / 2, kH * 3 / 2);
+    setSize ((int) (kW * 0.75), (int) (kH * 0.75));   // en dernier : déclenche resized() une fois tout créé
+    startTimerHz (10);
 }
 
-ReverieEditor::~ReverieEditor() { setLookAndFeel (nullptr); }
+ReverieEditor::~ReverieEditor()
+{
+    stopTimer();
+    setLookAndFeel (nullptr);
+}
+
+void ReverieEditor::timerCallback()
+{
+    const char* onIds[Params::NumModules] = { ID::swOn, ID::r1On, ID::r2On, ID::sgOn, ID::dlOn, ID::qdOn, ID::eqOn, ID::cpOn };
+    for (int m = 0; m < Params::NumModules; ++m)
+    {
+        const int en = proc.apvts.getRawParameterValue (onIds[m])->load() > 0.5f ? 1 : 0;
+        if (en == lastEnabled[m]) continue;
+        lastEnabled[m] = en;
+        for (auto* c : groups[m]) c->setAlpha (en ? 1.0f : 0.4f);   // module coupé : commandes estompées
+    }
+}
 
 void ReverieEditor::resized()
 {
-    art.setBounds (getLocalBounds());
+    content.setTransform ({});
+    content.setBounds (0, 0, kW, kH);
+    content.setTransform (AffineTransform::scale ((float) getWidth() / (float) kW));
+}
 
+void ReverieEditor::layoutContent()
+{
+    art.setBounds (0, 0, kW, kH);
     inK->setBounds  (40, 24, 84, 78);
     outK->setBounds (kW - 40 - 84, 24, 84, 78);
 
     // bandeau de l'ordre des modules
     const Rectangle<int> strip (kMargin, 106, kW - 2 * kMargin, 36);
-    for (int i = 0; i < 6; ++i)
+    for (int i = 0; i < Params::NumModules; ++i)
         slot[i]->setBounds (strip.getX() + kStripLabelW + i * (kStripComboW + kStripGap), strip.getY() + 1, kStripComboW, strip.getHeight() - 2);
 
-    // panneaux
-    const int usable = kW - 2 * kMargin - 2 * 16;
-    auto widths = [&] (float a, float b) { return std::array<int, 3> { (int) (usable * a), (int) (usable * b), usable - (int) (usable * a) - (int) (usable * b) }; };
-    const auto wA = widths (0.27f, 0.31f);
-    const auto wB = widths (0.45f, 0.33f);
-    const int yA = 150, hA = 288, yB = 450, hB = 308;
+    // trois rangées de panneaux
+    const int gap = 16, hA = 270, hB = 270, hC = 292;
+    const int yA = 150, yB = yA + hA + 12, yC = yB + hB + 12;
+    auto split = [&] (int total, std::initializer_list<float> fr)
+    {
+        std::vector<int> w;  int used = 0, i = 0;
+        const int n = (int) fr.size();
+        const int usable = total - (n - 1) * gap;
+        for (float f : fr) { ++i; const int v = (i == n) ? usable - used : (int) (usable * f); w.push_back (v); used += v; }
+        return w;
+    };
+    const int total = kW - 2 * kMargin;
+    const auto wA = split (total, { 0.27f, 0.31f, 0.42f });
+    const auto wB = split (total, { 0.50f, 0.50f });
+    const auto wC = split (total, { 0.28f, 0.50f, 0.22f });
 
-    Rectangle<int> swell   (kMargin, yA, wA[0], hA);
-    Rectangle<int> reverb  (swell.getRight() + 16, yA, wA[1], hA);
-    Rectangle<int> shim    (reverb.getRight() + 16, yA, wA[2], hA);
-    Rectangle<int> dly     (kMargin, yB, wB[0], hB);
-    Rectangle<int> quad    (dly.getRight() + 16, yB, wB[1], hB);
-    Rectangle<int> compR   (quad.getRight() + 16, yB, wB[2], hB);
+    Rectangle<int> swell  (kMargin, yA, wA[0], hA);
+    Rectangle<int> reverb (swell.getRight() + gap, yA, wA[1], hA);
+    Rectangle<int> shim   (reverb.getRight() + gap, yA, wA[2], hA);
+    Rectangle<int> sego   (kMargin, yB, wB[0], hB);
+    Rectangle<int> dly    (sego.getRight() + gap, yB, wB[1], hB);
+    Rectangle<int> quad   (kMargin, yC, wC[0], hC);
+    Rectangle<int> eqR    (quad.getRight() + gap, yC, wC[1], hC);
+    Rectangle<int> compR  (eqR.getRight() + gap, yC, wC[2], hC);
 
-    auto content = [] (Rectangle<int> r) { return r.withTrimmedTop (60).reduced (10, 2).withTrimmedBottom (10); };
+    auto contentOf = [] (Rectangle<int> r) { return r.withTrimmedTop (60).reduced (10, 2).withTrimmedBottom (10); };
     auto cell = [] (Rectangle<int> c, int cols, int rows, int col, int row)
     {
         const int cw = c.getWidth() / cols, ch = c.getHeight() / rows;
         return Rectangle<int> (c.getX() + col * cw, c.getY() + row * ch, cw, ch).reduced (2);
     };
-    auto gemPos = [] (Rectangle<int> r, Gem* g) { g->setBounds (r.getRight() - 40, r.getY() + 24, 24, 24); };
+    auto gemPos = [] (Rectangle<int> r, Gem* g) { g->setBounds (r.getRight() - 62, r.getY() + 23, 50, 26); };
 
-    // Swell : 3 colonnes x 2 lignes
     gemPos (swell, swGem);
-    for (int i = 0; i < 5; ++i) swK[i]->setBounds (cell (content (swell), 3, 2, i % 3, i / 3));
+    for (int i = 0; i < 5; ++i) swK[i]->setBounds (cell (contentOf (swell), 3, 2, i % 3, i / 3));
 
-    // Reverb 1
     gemPos (reverb, r1Gem);
-    for (int i = 0; i < 6; ++i) r1K[i]->setBounds (cell (content (reverb), 3, 2, i % 3, i / 3));
+    for (int i = 0; i < 6; ++i) r1K[i]->setBounds (cell (contentOf (reverb), 3, 2, i % 3, i / 3));
 
-    // Shimmer : 4 colonnes x 2 lignes (7 boutons + choix d'intervalle)
     gemPos (shim, r2Gem);
-    for (int i = 0; i < 7; ++i) r2K[i]->setBounds (cell (content (shim), 4, 2, i % 4, i / 4));
-    r2Int->setBounds (cell (content (shim), 4, 2, 3, 1));
+    for (int i = 0; i < 7; ++i) r2K[i]->setBounds (cell (contentOf (shim), 4, 2, i % 4, i / 4));
+    r2Int->setBounds (cell (contentOf (shim), 4, 2, 3, 1));
+
+    // Superego : 7 colonnes x 2 lignes
+    gemPos (sego, sgGem);
+    const auto sc = contentOf (sego);
+    sgMode->setBounds (cell (sc, 7, 2, 0, 0));
+    for (int i = 0; i < 5; ++i) sgK[i]->setBounds (cell (sc, 7, 2, 1 + i, 0));
+    freezeBtn->setBounds (cell (sc, 7, 2, 6, 0).withSizeKeepingCentre (jmin (cell (sc, 7, 2, 6, 0).getWidth() - 4, 88), 44).translated (0, 8));
+    sgFx->setBounds (cell (sc, 7, 2, 0, 1));
+    sgK[5]->setBounds (cell (sc, 7, 2, 1, 1));
+    sgK[6]->setBounds (cell (sc, 7, 2, 2, 1));
+    sgK[7]->setBounds (cell (sc, 7, 2, 3, 1));
+    sgK[8]->setBounds (cell (sc, 7, 2, 4, 1));
+    clearBtn.setBounds (cell (sc, 7, 2, 6, 1).withSizeKeepingCentre (jmin (cell (sc, 7, 2, 6, 1).getWidth() - 4, 88), 34).translated (0, 6));
 
     // Delay : 6 colonnes x 2 lignes (gauche | centre | droite)
     gemPos (dly, dlGem);
-    syncGem->setBounds (dly.getRight() - 40 - 74, dly.getY() + 24, 70, 24);
-    const auto dc = content (dly);
+    syncGem->setBounds (dly.getRight() - 62 - 78, dly.getY() + 23, 74, 26);
+    const auto dc = contentOf (dly);
     for (int i = 0; i < 6; ++i) dlK[i]->setBounds (cell (dc, 6, 2, i, 0));
     dlDivL->setBounds (cell (dc, 6, 2, 0, 1));
     dlK[6]->setBounds (cell (dc, 6, 2, 1, 1));
@@ -555,21 +773,35 @@ void ReverieEditor::resized()
 
     // Quadravox : 4 voix en colonnes (pitch / level / pan) + mix
     gemPos (quad, qdGem);
-    const auto qc = content (quad);
+    const auto qc = contentOf (quad);
     for (int v = 0; v < 4; ++v)
         for (int k = 0; k < 3; ++k)
             qdK[v * 3 + k]->setBounds (cell (qc, 5, 3, v, k));
     qdMix->setBounds (cell (qc, 5, 3, 4, 1));
 
-    // Compresseur
+    // Egaliseur : courbe à gauche, 6 bandes en colonnes (frequence / gain / Q)
+    gemPos (eqR, eqGem);
+    auto ec = contentOf (eqR);
+    eqCurve->setBounds (ec.removeFromLeft (250).reduced (2, 4));
+    ec.removeFromLeft (6);
+    auto at = [&] (int col, int row) { return cell (ec, 6, 3, col, row); };
+    eqK[0]->setBounds (at (0, 0));
+    eqK[1]->setBounds (at (1, 0));  eqK[2]->setBounds (at (1, 1));
+    eqK[3]->setBounds (at (2, 0));  eqK[4]->setBounds (at (2, 1));  eqK[5]->setBounds (at (2, 2));
+    eqK[6]->setBounds (at (3, 0));  eqK[7]->setBounds (at (3, 1));  eqK[8]->setBounds (at (3, 2));
+    eqK[9]->setBounds (at (4, 0));  eqK[10]->setBounds (at (4, 1));
+    eqK[11]->setBounds (at (5, 0));
+
     gemPos (compR, cpGem);
-    for (int i = 0; i < 6; ++i) cpK[i]->setBounds (cell (content (compR), 3, 2, i % 3, i / 3));
+    for (int i = 0; i < 6; ++i) cpK[i]->setBounds (cell (contentOf (compR), 3, 2, i % 3, i / 3));
 
     art.setPanels ({ { swell.toFloat(),  "SWELL",        Pal::olive },
                      { reverb.toFloat(), "REVERB",       Pal::teal },
                      { shim.toFloat(),   "SHIMMER",      Pal::rose },
-                     { dly.toFloat(),    "STEREO DELAY", Pal::plum },
+                     { sego.toFloat(),   "SUPEREGO",     Pal::plum },
+                     { dly.toFloat(),    "STEREO DELAY", Pal::sky },
                      { quad.toFloat(),   "QUADRAVOX",    Pal::sky },
+                     { eqR.toFloat(),    "EQUALIZER",    Pal::teal },
                      { compR.toFloat(),  "COMPRESSOR",   Pal::ochre } },
                    strip.toFloat());
 }
